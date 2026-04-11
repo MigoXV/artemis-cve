@@ -12,9 +12,8 @@ from tqdm import tqdm
 
 from artemis_cve.inferencers.yolo import YoloBoxInferencer
 
-ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_MODEL_DIR = ROOT / "model-bin" / "hf_yoloe"
-DEFAULT_VIDEO_PATH = ROOT / "data-bin" / "1082895552-1-208.mp4"
+DEFAULT_MODEL_DIR = Path("model-bin/MigoXV/yoloe26-x-seg")
+DEFAULT_VIDEO_PATH = Path("data-bin/1082895552-1-208.mp4")
 
 
 def parse_args() -> argparse.Namespace:

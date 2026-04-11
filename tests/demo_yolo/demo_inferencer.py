@@ -7,9 +7,8 @@ import cv2
 
 from artemis_cve.inferencers.yolo import YoloBoxInferencer
 
-ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_MODEL_DIR = ROOT / "model-bin" / "hf_yoloe"
-DEFAULT_OUTPUT_DIR = ROOT / "data-bin" / "demo-outputs"
+DEFAULT_MODEL_DIR = Path("model-bin/MigoXV/yoloe26-x-seg")
+DEFAULT_OUTPUT_DIR = Path("data-bin/demo-outputs")
 
 
 def draw_boxes(image, detections):
