@@ -7,8 +7,7 @@ import cv2
 
 from artemis_cve.inferencers.yolo import YoloBoxInferencer
 
-ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_MODEL_DIR = ROOT / "model-bin" / "hf_yoloe"
+DEFAULT_MODEL_DIR = Path("model-bin/MigoXV/yoloe26-x-seg")
 
 
 def main() -> None:

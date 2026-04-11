@@ -11,8 +11,9 @@ from transformers import AutoConfig, AutoModel
 from ultralytics.data.augment import LetterBox
 from ultralytics.utils.ops import scale_boxes
 
-from artemis_cve.models.yolo26e import YOLOEModel
-from artemis_cve.models.yolo26e_cuda_graph import CUDAGraphYOLOEModel
+from artemis_cve.models.mobileclip2 import YOLOETextEncoder
+
+from .runtime import BaseYoloRuntime, CudaGraphYoloRuntime, RawYoloOutput
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,10 +73,10 @@ class YoloBoxInferencer:
         self.use_cuda_graph = bool(self.device.type == "cuda") if use_cuda_graph is None else bool(use_cuda_graph)
         if self.use_cuda_graph and self.device.type != "cuda":
             raise ValueError("use_cuda_graph=True requires a CUDA device.")
-        if self.use_cuda_graph and isinstance(self.model, YOLOEModel) and not isinstance(self.model, CUDAGraphYOLOEModel):
-            self.model = CUDAGraphYOLOEModel.from_base(self.model)
         self.model.to(device=self.device, dtype=self.dtype)
         self.model.eval()
+        runtime_cls = CudaGraphYoloRuntime if self.use_cuda_graph else BaseYoloRuntime
+        self.runtime = runtime_cls(self.model)
 
         default_class_names = tuple(str(name) for name in getattr(self.config, "default_classes", []) if str(name))
         provided_class_names = tuple(str(name).strip() for name in (class_names or []) if str(name).strip())
@@ -85,6 +86,15 @@ class YoloBoxInferencer:
                 "class_names must be provided for this model. "
                 "Pass them via CLI/env or add default_classes to the model config."
             )
+        self.text_encoder = YOLOETextEncoder.from_pretrained(
+            self.model_dir,
+            config=self.config,
+            device=self.device,
+        )
+        self.text_embeddings = self.text_encoder.encode(
+            self.class_names,
+            dtype=self.dtype,
+        ).to(device=self.device, dtype=self.dtype)
 
         self.imgsz = int(imgsz or getattr(self.config, "image_size", self.DEFAULT_IMGSZ))
         strides = getattr(self.config, "stride", None) or [32]
@@ -141,7 +151,7 @@ class YoloBoxInferencer:
 
     def _convert_outputs(
         self,
-        outputs: Any,
+        outputs: RawYoloOutput,
         original_shape: tuple[int, int],
         processed_shape: tuple[int, int],
         score_threshold: float,
@@ -192,6 +202,20 @@ class YoloBoxInferencer:
             detections = detections[:max_detections]
         return detections
 
+    def _forward_raw(
+        self,
+        pixel_values: torch.Tensor,
+        max_detections: int | None = None,
+    ) -> RawYoloOutput:
+        request_kwargs: dict[str, Any] = {
+            "pixel_values": pixel_values,
+            "text_embeddings": self.text_embeddings,
+            "include_masks": False,
+        }
+        if max_detections is not None and max_detections > 0:
+            request_kwargs["max_det"] = int(max_detections)
+        return self.runtime.forward(**request_kwargs)
+
     @torch.no_grad()
     def infer(
         self,
@@ -200,14 +224,10 @@ class YoloBoxInferencer:
         max_detections: int | None = None,
     ) -> list[BoxDetection]:
         tensor, original_shape, processed_shape = self._preprocess(bgr)
-        request_kwargs: dict[str, Any] = {
-            "pixel_values": tensor,
-            "class_names": list(self.class_names),
-        }
-        if max_detections is not None and max_detections > 0:
-            request_kwargs["max_det"] = int(max_detections)
-
-        outputs = self.model(**request_kwargs)
+        outputs = self._forward_raw(
+            pixel_values=tensor,
+            max_detections=max_detections,
+        )
         return self._convert_outputs(
             outputs=outputs,
             original_shape=original_shape,

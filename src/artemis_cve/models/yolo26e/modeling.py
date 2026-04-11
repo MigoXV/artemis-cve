@@ -1,16 +1,29 @@
 from __future__ import annotations
 
-from typing import Any
+from pathlib import Path
 
 import torch
 from transformers import PreTrainedModel
+from ultralytics.nn.modules import YOLOEDetect
 
-from .backend import YOLOEBackend
+from .backend import (
+    build_ultralytics_task_model,
+    forward_yoloe_task_model_raw,
+    normalize_text_embeddings,
+)
 from .configuration import YOLOEConfig
-from .outputs import YOLOEOutput
+from .io import load_checkpoint_state, resolve_weights_path
+from .outputs import YOLOERawOutput
 
 
 class YOLOEModel(PreTrainedModel):
+    """适配 Hugging Face 接口的 YOLOE 模型。
+
+    模型主体仍然使用 Ultralytics 的内部模块，但对外暴露
+    `from_pretrained`、`forward`、配置绑定与权重校验能力，
+    方便被 `AutoModel` 和项目推理层统一调用。
+    """
+
     config_class = YOLOEConfig
     base_model_prefix = "yoloe"
     main_input_name = "pixel_values"
@@ -18,134 +31,179 @@ class YOLOEModel(PreTrainedModel):
     _keys_to_ignore_on_load_unexpected = [r".*"]
 
     def __init__(self, config: YOLOEConfig) -> None:
+        """根据配置构建底层 Ultralytics YOLOE 模型。"""
+
         super().__init__(config)
-        self.runtime_backend = YOLOEBackend(config)
+        task_model = build_ultralytics_task_model(config)
+        self.model = task_model.model
+        self.save = list(task_model.save)
+        self.stride = task_model.stride
+        self.yaml = getattr(task_model, "yaml", {})
+        self.args = getattr(task_model, "args", {})
+        self.names = getattr(task_model, "names", None)
+        self.text_model = getattr(task_model, "text_model", f"{config.text_encoder_type}:b")
         self.post_init()
 
-    def _get_backend(self) -> Any:
-        return self.runtime_backend.get()
+    @classmethod
+    def from_pretrained(
+        cls,
+        pretrained_model_name_or_path: str | Path,
+        *model_args,
+        **kwargs,
+    ) -> "YOLOEModel":
+        """从导出的模型目录或 Hub 仓库加载 YOLOE 模型。
 
-    def _prepare_class_names(
-        self,
-        class_names: list[str] | tuple[str, ...] | None,
-    ) -> list[str]:
-        if class_names is None:
-            names = list(self.config.default_classes)
-            if not names and self.config.open_vocab:
-                raise ValueError("class_names must be provided for open-vocabulary inference.")
-            return names
+        与默认的 `PreTrainedModel.from_pretrained` 不同，这里显式读取
+        `model.safetensors`，并要求权重键与模型结构严格一致。
+        """
 
-        names = list(class_names)
-        if not names and self.config.open_vocab:
-            raise ValueError("class_names must be provided for open-vocabulary inference.")
-        return names
+        if model_args:
+            raise ValueError("YOLOEModel.from_pretrained does not accept positional model args.")
 
-    def _validate_pixel_values(self, pixel_values: torch.Tensor) -> torch.Tensor:
-        if not isinstance(pixel_values, torch.Tensor):
-            raise TypeError(f"pixel_values must be a torch.Tensor, got {type(pixel_values)!r}")
-        if pixel_values.ndim != 4:
-            raise ValueError(
-                "pixel_values must have shape [batch, channels, height, width]. "
-                f"Received shape: {tuple(pixel_values.shape)}"
+        requested_dtype = kwargs.pop("dtype", None)
+        requested_torch_dtype = kwargs.pop("torch_dtype", None)
+        token = kwargs.pop("token", None)
+        revision = kwargs.pop("revision", None)
+        resolved_config = kwargs.pop("config", None)
+        if resolved_config is None:
+            config_kwargs = dict(kwargs)
+            if token is not None:
+                config_kwargs["token"] = token
+            if revision is not None:
+                config_kwargs["revision"] = revision
+            resolved_config = cls.config_class.from_pretrained(str(pretrained_model_name_or_path), **config_kwargs)
+
+        model = cls(resolved_config)
+        weights_path = resolve_weights_path(
+            pretrained_model_name_or_path,
+            token=token,
+            revision=revision,
+        )
+        if weights_path is None:
+            raise FileNotFoundError("Could not find model.safetensors for pretrained loading.")
+
+        state_dict, _ = load_checkpoint_state(weights_path)
+        incompatible = model.load_state_dict(state_dict, strict=True)
+        if incompatible.missing_keys or incompatible.unexpected_keys:
+            raise RuntimeError(
+                "Strict checkpoint loading failed. "
+                f"missing={incompatible.missing_keys[:10]} unexpected={incompatible.unexpected_keys[:10]}"
             )
+        model.validate_checkpoint_keys(
+            pretrained_model_name_or_path,
+            token=token,
+            revision=revision,
+        )
+
+        target_dtype = requested_torch_dtype or requested_dtype
+        if target_dtype is not None:
+            model = model.to(dtype=target_dtype)
+        return model
+
+    def validate_checkpoint_keys(
+        self,
+        pretrained_model_name_or_path: str | Path | None = None,
+        *,
+        token: str | None = None,
+        revision: str | None = None,
+    ) -> None:
+        """校验 checkpoint 键集合是否与当前模型完全一致。
+
+        该校验用于尽早发现导出布局与运行时代码不匹配的问题，
+        比如模型结构升级后仍误用旧权重。
+        """
+
+        source = pretrained_model_name_or_path or self.config.name_or_path
+        weights_path = resolve_weights_path(
+            source,
+            token=token,
+            revision=revision,
+        )
+        if weights_path is None:
+            raise FileNotFoundError("Could not find model.safetensors for checkpoint validation.")
+
+        checkpoint_state, _ = load_checkpoint_state(weights_path)
+        checkpoint_keys = set(checkpoint_state)
+        model_keys = set(self.state_dict())
+        missing = sorted(model_keys - checkpoint_keys)
+        unexpected = sorted(checkpoint_keys - model_keys)
+        if missing or unexpected:
+            raise RuntimeError(
+                "Checkpoint keys do not match the pure nn.Module model layout. "
+                f"missing={missing[:10]} unexpected={unexpected[:10]}"
+            )
+
+    def get_detection_head(self) -> YOLOEDetect:
+        """返回模型末端的 YOLOE 检测头。"""
+
+        head = self.model[-1]
+        if not isinstance(head, YOLOEDetect):
+            raise TypeError(f"Expected YOLOEDetect-compatible head, got {type(head)!r}")
+        return head
+
+    def get_cls_pe(
+        self,
+        text_prompt_embeddings: torch.Tensor | None,
+        visual_prompt_embeddings: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """拼接文本提示嵌入与视觉提示嵌入。
+
+        YOLOE 的提示编码接口统一把不同来源的 prompt 在类别维拼接，
+        因此这里提供一个最小封装，避免调用方重复处理空值逻辑。
+        """
+
+        all_embeddings: list[torch.Tensor] = []
+        if text_prompt_embeddings is not None:
+            all_embeddings.append(text_prompt_embeddings)
+        if visual_prompt_embeddings is not None:
+            all_embeddings.append(visual_prompt_embeddings)
+        if not all_embeddings:
+            raise ValueError("At least one prompt embedding tensor is required.")
+        return torch.cat(all_embeddings, dim=1)
+
+    def project_text_embeddings(
+        self,
+        text_embeddings: torch.Tensor,
+    ) -> torch.Tensor:
+        """把外部文本嵌入投影到检测头使用的提示空间。"""
+
+        head = self.get_detection_head()
+        normalized = normalize_text_embeddings(
+            text_embeddings,
+            expected_dim=int(self.config.text_embedding_dim),
+            device=next(self.parameters()).device,
+            dtype=next(self.parameters()).dtype,
+        )
+        return head.get_tpe(normalized)
+
+    def forward(
+        self,
+        pixel_values: torch.Tensor,
+        *,
+        text_embeddings: torch.Tensor | None = None,
+        return_text_embeddings: bool = False,
+        include_masks: bool = True,
+    ) -> YOLOERawOutput:
+        """执行模型前向，并返回未后处理的 YOLOE 输出。
+
+        Args:
+            pixel_values: 输入图像张量。
+            text_embeddings: 可选文本嵌入。
+            return_text_embeddings: 是否回传规范化后的文本嵌入。
+            include_masks: 是否包含分割相关输出。
+        """
+
         if pixel_values.shape[1] != self.config.num_channels:
             raise ValueError(
                 f"Expected {self.config.num_channels} channels, received {pixel_values.shape[1]}."
             )
         if not pixel_values.is_floating_point():
             pixel_values = pixel_values.float()
-        return pixel_values
 
-    def _empty_output(
-        self,
-        device: torch.device,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, None]:
-        return (
-            torch.empty((0, 4), dtype=torch.float32, device=device),
-            torch.empty((0,), dtype=torch.float32, device=device),
-            torch.empty((0,), dtype=torch.long, device=device),
-            None,
+        return forward_yoloe_task_model_raw(
+            self,
+            pixel_values,
+            text_embeddings=text_embeddings,
+            return_text_embeddings=return_text_embeddings,
+            include_masks=include_masks,
         )
-
-    def _convert_results(self, results: Any, device: torch.device) -> YOLOEOutput:
-        boxes_list: list[torch.Tensor] = []
-        scores_list: list[torch.Tensor] = []
-        labels_list: list[torch.Tensor] = []
-        masks_list: list[torch.Tensor | None] = []
-
-        for result in results:
-            boxes = getattr(result, "boxes", None)
-            masks = getattr(result, "masks", None)
-
-            if boxes is None or getattr(boxes, "xyxy", None) is None:
-                box_tensor, score_tensor, label_tensor, mask_tensor = self._empty_output(device)
-                boxes_list.append(box_tensor)
-                scores_list.append(score_tensor)
-                labels_list.append(label_tensor)
-                masks_list.append(mask_tensor)
-                continue
-
-            xyxy = boxes.xyxy.detach().to(device=device, dtype=torch.float32)
-            conf = getattr(boxes, "conf", None)
-            cls = getattr(boxes, "cls", None)
-
-            if conf is None:
-                conf = torch.empty((xyxy.shape[0],), dtype=torch.float32, device=device)
-            else:
-                conf = conf.detach().to(device=device, dtype=torch.float32)
-
-            if cls is None:
-                cls = torch.empty((xyxy.shape[0],), dtype=torch.long, device=device)
-            else:
-                cls = cls.detach().to(device=device, dtype=torch.long)
-
-            mask_tensor = None
-            if masks is not None and getattr(masks, "data", None) is not None:
-                mask_tensor = masks.data.detach().to(device=device)
-
-            boxes_list.append(xyxy)
-            scores_list.append(conf)
-            labels_list.append(cls)
-            masks_list.append(mask_tensor)
-
-        return YOLOEOutput(
-            boxes=boxes_list,
-            scores=scores_list,
-            labels=labels_list,
-            masks=masks_list,
-            raw_results=results,
-        )
-
-    def forward(
-        self,
-        pixel_values: torch.Tensor,
-        class_names: list[str] | tuple[str, ...] | None = None,
-        return_dict: bool = True,
-        **kwargs,
-    ) -> YOLOEOutput | tuple[
-        list[torch.Tensor],
-        list[torch.Tensor],
-        list[torch.Tensor],
-        list[torch.Tensor | None],
-    ]:
-        pixel_values = self._validate_pixel_values(pixel_values)
-        backend = self._get_backend()
-        backend = backend.to(pixel_values.device)
-        backend.eval()
-
-        names = self._prepare_class_names(class_names)
-        if names:
-            backend.set_classes(names)
-
-        results = backend.predict(
-            source=pixel_values,
-            conf=self.config.score_threshold,
-            iou=self.config.iou_threshold,
-            verbose=False,
-            **kwargs,
-        )
-        output = self._convert_results(results, pixel_values.device)
-
-        if not return_dict:
-            return output.boxes, output.scores, output.labels, output.masks
-        return output

@@ -22,8 +22,7 @@ from artemis_cve.protos.detector import common_pb2
 from artemis_cve.protos.detector import webrtc_detector_pb2 as pb2
 from artemis_cve.protos.detector import webrtc_detector_pb2_grpc as pb2_grpc
 
-ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_VIDEO_PATH = ROOT / "data-bin" / "car.mp4"
+DEFAULT_VIDEO_PATH = Path("data-bin/car.mp4")
 
 
 class VideoFileTrack(MediaStreamTrack):

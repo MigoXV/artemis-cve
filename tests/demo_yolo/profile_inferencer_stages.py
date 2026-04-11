@@ -13,9 +13,8 @@ from tqdm import tqdm
 
 from artemis_cve.inferencers.yolo import BoxDetection, YoloBoxInferencer
 
-ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_MODEL_DIR = ROOT / "model-bin" / "hf_yoloe"
-DEFAULT_VIDEO_PATH = ROOT / "data-bin" / "1082895552-1-208.mp4"
+DEFAULT_MODEL_DIR = Path("model-bin/MigoXV/yoloe26-x-seg")
+DEFAULT_VIDEO_PATH = Path("data-bin/1082895552-1-208.mp4")
 STAGE_ORDER = ("preprocess_cpu", "host_to_device", "forward", "postprocess")
 
 
@@ -215,16 +214,12 @@ def main() -> None:
                 lambda processed=processed: host_to_device(inferencer, processed),
             )
 
-            request_kwargs: dict[str, Any] = {
-                "pixel_values": tensor,
-                "class_names": list(inferencer.class_names),
-            }
-            if args.max_detections is not None and args.max_detections > 0:
-                request_kwargs["max_det"] = int(args.max_detections)
-
             outputs, forward_s = timed_call(
                 args.device,
-                lambda: inferencer.model(**request_kwargs),
+                lambda: inferencer._forward_raw(
+                    pixel_values=tensor,
+                    max_detections=args.max_detections,
+                ),
             )
             detections, postprocess_s = timed_call(
                 args.device,
