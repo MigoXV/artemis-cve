@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import io
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Sequence
 
 import clip
 import torch
 from transformers import AutoConfig
 
-from .io import ASSET_PREFIX, load_checkpoint_state, resolve_text_encoder_dir, resolve_weights_path
+from .io import ASSET_PREFIX, load_checkpoint_state, resolve_weights_path
 
 
 class MobileCLIPTextEncoder:
@@ -43,8 +43,6 @@ class MobileCLIPTextEncoder:
         cls,
         model_dir: str | Path,
         *,
-        config: Any | None = None,
-        text_encoder_dir: str | Path | None = None,
         device: str | torch.device = "cpu",
         token: str | None = None,
         revision: str | None = None,
@@ -52,9 +50,7 @@ class MobileCLIPTextEncoder:
         """从导出的模型目录中恢复文本编码器。
 
         Args:
-            model_dir: 主模型目录，或可解析到 Hub 仓库的名称。
-            config: 可选配置对象；未提供时会自动加载。
-            text_encoder_dir: 文本编码器所在目录，可覆盖配置中的路径。
+            model_dir: 文本编码器模型目录，或可解析到 Hub 仓库的名称。
             device: 目标设备。
             token: 访问私有仓库时使用的令牌。
             revision: 需要解析的仓库版本。
@@ -73,7 +69,7 @@ class MobileCLIPTextEncoder:
             config_kwargs["token"] = token
         if revision is not None:
             config_kwargs["revision"] = revision
-        resolved_config = config or AutoConfig.from_pretrained(str(model_dir), **config_kwargs)
+        resolved_config = AutoConfig.from_pretrained(str(model_dir), **config_kwargs)
 
         text_encoder_type = str(getattr(resolved_config, "text_encoder_type", ""))
         if text_encoder_type != "mobileclip2":
@@ -82,40 +78,25 @@ class MobileCLIPTextEncoder:
                 "Only 'mobileclip2' is currently supported."
             )
 
-        configured_dir = text_encoder_dir or getattr(resolved_config, "text_encoder_path", None)
         resolved_model_dir = Path(getattr(resolved_config, "name_or_path", "") or model_dir)
-        primary_dir = resolve_text_encoder_dir(
-            resolved_model_dir,
-            text_encoder_path=configured_dir,
-        )
-        search_dirs = [primary_dir]
-        primary_key = str(primary_dir)
-        fallback_key = str(resolved_model_dir)
-        if primary_key != fallback_key:
-            search_dirs.append(fallback_key)
-
         asset_key = f"{ASSET_PREFIX}{getattr(resolved_config, 'text_encoder_asset')}"
-        asset_tensor = None
-        available_assets: list[str] = []
-        for candidate_dir in search_dirs:
-            weights_path = resolve_weights_path(
-                candidate_dir,
-                token=token,
-                revision=revision,
+        weights_path = resolve_weights_path(
+            resolved_model_dir,
+            token=token,
+            revision=revision,
+        )
+        if weights_path is None:
+            raise FileNotFoundError(
+                f"Could not find model.safetensors for text encoder model: {resolved_model_dir}"
             )
-            if weights_path is None:
-                continue
-            _, asset_tensors = load_checkpoint_state(weights_path)
-            available_assets = sorted(key.removeprefix(ASSET_PREFIX) for key in asset_tensors)
-            asset_tensor = asset_tensors.get(asset_key)
-            if asset_tensor is not None:
-                break
 
+        _, asset_tensors = load_checkpoint_state(weights_path)
+        available_assets = sorted(key.removeprefix(ASSET_PREFIX) for key in asset_tensors)
+        asset_tensor = asset_tensors.get(asset_key)
         if asset_tensor is None:
-            searched = ", ".join(str(path) for path in search_dirs)
             raise FileNotFoundError(
                 f"Missing text encoder asset '{getattr(resolved_config, 'text_encoder_asset')}' "
-                f"in searched model.safetensors files. searched_dirs=[{searched}] "
+                f"in text encoder model.safetensors. searched_dir={resolved_model_dir} "
                 f"available_assets={available_assets or ['<none>']}"
             )
 

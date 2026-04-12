@@ -110,6 +110,7 @@ class YoloBoxInferencerTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "requires a CUDA device"):
                 YoloBoxInferencer(
                     model_dir="unused",
+                    textencoder_model_dir="unused-text",
                     class_names=["car"],
                     device="cpu",
                     use_cuda_graph=True,
@@ -131,6 +132,7 @@ class YoloBoxInferencerTests(unittest.TestCase):
         ):
             inferencer = YoloBoxInferencer(
                 model_dir="unused",
+                textencoder_model_dir="unused-text",
                 class_names=["car"],
                 device="cpu",
                 use_cuda_graph=False,

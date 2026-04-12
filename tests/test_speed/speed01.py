@@ -19,6 +19,7 @@ import torch
 from artemis_cve.inferencers.yolo import YoloBoxInferencer
 
 DEFAULT_MODEL_DIR = Path("model-bin/MigoXV/yoloe26-x-seg")
+DEFAULT_TEXT_ENCODER_MODEL_DIR = Path("model-bin/MigoXV/mobileclip2-b")
 DEFAULT_CLASS_NAMES_FILE = Path("model-bin/names.txt")
 DEFAULT_VIDEO_PATH = Path("data-bin/1082895552-1-208.mp4")
 DEFAULT_OUTPUT_ROOT = Path("data-bin/speed")
@@ -32,6 +33,7 @@ def parse_args() -> argparse.Namespace:
         description="Benchmark inferencer latency on local MigoXV repos across multiple CUDA devices."
     )
     parser.add_argument("--model-dir", default=str(DEFAULT_MODEL_DIR))
+    parser.add_argument("--textencoder-model-dir", default=str(DEFAULT_TEXT_ENCODER_MODEL_DIR))
     parser.add_argument("--class-names-file", default=str(DEFAULT_CLASS_NAMES_FILE))
     parser.add_argument("--video", default=str(DEFAULT_VIDEO_PATH))
     parser.add_argument("--devices", nargs="+", default=list(DEFAULT_DEVICES))
@@ -243,6 +245,7 @@ def benchmark_device(
         start_load = time.perf_counter()
         inferencer = YoloBoxInferencer(
             model_dir=model_dir,
+            textencoder_model_dir=args.textencoder_model_dir,
             class_names=class_names,
             device=device,
             dtype=dtype,
@@ -304,7 +307,7 @@ def benchmark_device(
         "torch_device_name": torch.cuda.get_device_name(device_index),
         "dtype": dtype,
         "model_dir": model_dir,
-        "text_encoder_path": str(getattr(inferencer.config, "text_encoder_path", "")),
+        "textencoder_model_dir": str(args.textencoder_model_dir),
         "output_video": str(output_video_path),
         "load_time_s": round(load_time_s, 4),
         "warmup_frames": warmup_count,
@@ -336,6 +339,8 @@ def run_benchmark_subprocess(
         str(script_path),
         "--model-dir",
         str(args.model_dir),
+        "--textencoder-model-dir",
+        str(args.textencoder_model_dir),
         "--class-names-file",
         str(args.class_names_file),
         "--video",

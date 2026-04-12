@@ -18,10 +18,15 @@ app = typer.Typer(name="artemis-cve")
 
 @app.command()
 def serve(
-    model_dir: str = typer.Argument(
+    model_path: str = typer.Argument(
         ...,
         envvar="MODEL_PATH",
         help="Local YOLOE model directory.",
+    ),
+    textencoder_model_path: str = typer.Argument(
+        ...,
+        envvar="TEXT_ENCODER_MODEL_PATH",
+        help="Local text encoder model directory.",
     ),
     class_names_file: str | None = typer.Option(
         None,
@@ -53,13 +58,14 @@ def serve(
     )
     logging.getLogger("aioice.ice").setLevel(logging.WARNING)
 
-    resolved_class_names = parse_class_names(class_names_file, Path(model_dir))
+    resolved_class_names = parse_class_names(class_names_file, Path(model_path))
 
     async def _run() -> None:
         server = grpc.aio.server()
         pb2_grpc.add_WebRtcDetectorEngineServicer_to_server(
             WebRtcDetectorServicer(
-                model_dir=model_dir,
+                model_dir=model_path,
+                textencoder_model_dir=textencoder_model_path,
                 class_names=resolved_class_names,
                 device=device,
                 dtype=dtype,

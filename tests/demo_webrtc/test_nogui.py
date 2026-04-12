@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import collections
 import contextlib
+from datetime import datetime
 import fractions
 import signal
 import threading
@@ -10,6 +12,7 @@ import time
 from pathlib import Path
 
 import av
+import cv2
 import grpc
 from aiortc import MediaStreamTrack, RTCPeerConnection, RTCSessionDescription
 from aiortc.mediastreams import MediaStreamError
@@ -35,6 +38,8 @@ class VideoFileTrack(MediaStreamTrack):
         self._time_base = fractions.Fraction(1, max(1, round(self._fps)))
         self._frame_index = 0
         self._started_at = time.perf_counter()
+        self._frame_buffer: collections.OrderedDict[int, object] = collections.OrderedDict()
+        self._frame_buffer_lock = threading.Lock()
 
     async def recv(self) -> VideoFrame:
         try:
@@ -47,6 +52,11 @@ class VideoFileTrack(MediaStreamTrack):
         frame = VideoFrame.from_ndarray(bgr, format="bgr24")
         frame.pts = self._frame_index
         frame.time_base = self._time_base
+        pts_ms = int(round(float(frame.pts * frame.time_base) * 1000.0))
+        with self._frame_buffer_lock:
+            self._frame_buffer[pts_ms] = bgr.copy()
+            while len(self._frame_buffer) > 300:
+                self._frame_buffer.popitem(last=False)
         self._frame_index += 1
         return frame
 
@@ -56,6 +66,12 @@ class VideoFileTrack(MediaStreamTrack):
 
         return self._frame_index
 
+    @property
+    def source_fps(self) -> float:
+        """返回输入视频声明的原始帧率。"""
+
+        return self._fps
+
     def current_fps(self) -> float:
         """按实际发送节奏计算当前平均帧率。"""
 
@@ -64,6 +80,12 @@ class VideoFileTrack(MediaStreamTrack):
             return 0.0
         return self._frame_index / elapsed
 
+    def pop_buffered_frame(self, pts_ms: int) -> object | None:
+        """按时间戳取出对应的原始视频帧。"""
+
+        with self._frame_buffer_lock:
+            return self._frame_buffer.pop(pts_ms, None)
+
     def stop(self) -> None:
         super().stop()
         if self._container is not None:
@@ -71,10 +93,74 @@ class VideoFileTrack(MediaStreamTrack):
             self._container = None
 
 
+class VideoResultWriter:
+    """把带检测结果的视频帧写入本地文件。"""
+
+    def __init__(self, output_path: Path, fps: float) -> None:
+        self.output_path = output_path
+        self.fps = max(1.0, fps)
+        self._writer: cv2.VideoWriter | None = None
+
+    def write(self, frame: object) -> None:
+        """写入一帧 BGR 图像；首次写入时自动初始化 writer。"""
+
+        height, width = frame.shape[:2]
+        if self._writer is None:
+            self.output_path.parent.mkdir(parents=True, exist_ok=True)
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            self._writer = cv2.VideoWriter(str(self.output_path), fourcc, self.fps, (width, height))
+            if not self._writer.isOpened():
+                raise RuntimeError(f"Failed to open output video for writing: {self.output_path}")
+        self._writer.write(frame)
+
+    def close(self) -> None:
+        """释放底层视频写入器。"""
+
+        if self._writer is not None:
+            self._writer.release()
+            self._writer = None
+
+
+def _draw_detections(
+    image: object,
+    det_reply: pb2.StreamDetectionsReply,
+) -> object:
+    """在图像上绘制检测框与类别信息。"""
+
+    annotated = image.copy()
+    for detection in det_reply.detections:
+        if not detection.geometry.HasField("box"):
+            continue
+        box = detection.geometry.box
+        x1, y1, x2, y2 = map(int, [box.x_min, box.y_min, box.x_max, box.y_max])
+        cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 0, 255), 2)
+        cv2.putText(
+            annotated,
+            f"{detection.class_name} {detection.score:.3f}",
+            (x1, max(20, y1 - 8)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (0, 0, 255),
+            1,
+        )
+    return annotated
+
+
+def _build_output_video_path(
+    video_path: Path,
+    output_root: Path,
+) -> Path:
+    """生成 `outputs/<时间戳>/` 下的视频输出路径。"""
+
+    timestamp_dir = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return output_root / timestamp_dir / f"{video_path.stem}-annotated.mp4"
+
+
 async def run_client(
     server_addr: str,
     video_path: Path,
     score_threshold: float,
+    output_video: Path,
 ) -> None:
     channel = grpc.aio.insecure_channel(server_addr)
     stub = pb2_grpc.WebRtcDetectorEngineStub(channel)
@@ -122,6 +208,7 @@ async def run_client(
 
     latest_reply: pb2.StreamDetectionsReply | None = None
     det_lock = threading.Lock()
+    result_writer = VideoResultWriter(output_video, fps=video_track.source_fps)
 
     async def recv_detections() -> None:
         nonlocal latest_reply
@@ -129,6 +216,10 @@ async def run_client(
             async for det_reply in stub.StreamDetections(pb2.StreamDetectionsRequest(stream_id=stream_id)):
                 with det_lock:
                     latest_reply = det_reply
+                frame = video_track.pop_buffered_frame(det_reply.pts_ms)
+                if frame is not None:
+                    annotated = _draw_detections(frame, det_reply)
+                    result_writer.write(annotated)
         finally:
             stop_event.set()
 
@@ -169,6 +260,7 @@ async def run_client(
         for task in (det_task,):
             with contextlib.suppress(asyncio.CancelledError, grpc.RpcError):
                 await task
+        result_writer.close()
         await pc.close()
         await channel.close()
         stop_event.set()
@@ -179,12 +271,16 @@ def main() -> None:
     parser.add_argument("--server", default="localhost:50051")
     parser.add_argument("--video", default=str(DEFAULT_VIDEO_PATH))
     parser.add_argument("--score-threshold", type=float, default=0.25)
+    parser.add_argument("--output-root", type=str, default="outputs")
     args = parser.parse_args()
+    video_path = Path(args.video)
+    output_video = _build_output_video_path(video_path, Path(args.output_root))
     asyncio.run(
         run_client(
             server_addr=args.server,
-            video_path=Path(args.video),
+            video_path=video_path,
             score_threshold=args.score_threshold,
+            output_video=output_video,
         )
     )
 

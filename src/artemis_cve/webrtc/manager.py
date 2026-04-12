@@ -16,6 +16,7 @@ class WebRtcSessionManager:
     def __init__(
         self,
         model_dir: str,
+        textencoder_model_dir: str,
         class_names: Sequence[str],
         device: str,
         dtype: str,
@@ -24,6 +25,7 @@ class WebRtcSessionManager:
         self._sessions: dict[str, WebRtcSession] = {}
         self.inferencer = SharedYoloBoxInferencer(
             model_dir=model_dir,
+            textencoder_model_dir=textencoder_model_dir,
             class_names=class_names,
             device=device,
             dtype=dtype,

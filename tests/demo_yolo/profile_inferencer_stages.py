@@ -14,6 +14,7 @@ from tqdm import tqdm
 from artemis_cve.inferencers.yolo import BoxDetection, YoloBoxInferencer
 
 DEFAULT_MODEL_DIR = Path("model-bin/MigoXV/yoloe26-x-seg")
+DEFAULT_TEXT_ENCODER_MODEL_DIR = Path("model-bin/MigoXV/mobileclip2-b")
 DEFAULT_VIDEO_PATH = Path("data-bin/1082895552-1-208.mp4")
 STAGE_ORDER = ("preprocess_cpu", "host_to_device", "forward", "postprocess")
 
@@ -34,6 +35,7 @@ def parse_args() -> argparse.Namespace:
         help="Comma-separated class names for open-vocabulary inference.",
     )
     parser.add_argument("--model-dir", default=str(DEFAULT_MODEL_DIR))
+    parser.add_argument("--textencoder-model-dir", default=str(DEFAULT_TEXT_ENCODER_MODEL_DIR))
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--dtype", default="fp32", choices=("fp32", "bf16", "fp16"))
     parser.add_argument("--cuda-graph", dest="cuda_graph", action="store_true")
@@ -190,6 +192,7 @@ def main() -> None:
     start_load = time.perf_counter()
     inferencer = YoloBoxInferencer(
         model_dir=args.model_dir,
+        textencoder_model_dir=args.textencoder_model_dir,
         class_names=class_names,
         device=args.device,
         dtype=args.dtype,

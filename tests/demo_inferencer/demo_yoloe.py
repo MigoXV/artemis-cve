@@ -9,6 +9,7 @@ import cv2
 from artemis_cve.inferencers.yolo import YoloBoxInferencer
 
 DEFAULT_MODEL_DIR = Path("model-bin/MigoXV/yoloe26-x-seg")
+DEFAULT_TEXT_ENCODER_MODEL_DIR = Path("model-bin/MigoXV/mobileclip2-b")
 DEFAULT_CLASS_NAMES_FILE = Path("model-bin/names.txt")
 DEFAULT_IMAGE_DIR = Path("data-bin/images")
 DEFAULT_OUTPUT_ROOT = Path("data-bin/outputs")
@@ -74,6 +75,7 @@ def main() -> None:
     parser.add_argument("--input-dir", default=str(DEFAULT_IMAGE_DIR), help="Directory containing input images.")
     parser.add_argument("--class-names-file", default=str(DEFAULT_CLASS_NAMES_FILE))
     parser.add_argument("--model-dir", default=str(DEFAULT_MODEL_DIR))
+    parser.add_argument("--textencoder-model-dir", default=str(DEFAULT_TEXT_ENCODER_MODEL_DIR))
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--dtype", default="fp32", choices=("fp32", "bf16", "fp16"))
     parser.add_argument("--score-threshold", type=float, default=0.25)
@@ -87,6 +89,7 @@ def main() -> None:
 
     inferencer = YoloBoxInferencer(
         model_dir=args.model_dir,
+        textencoder_model_dir=args.textencoder_model_dir,
         class_names=class_names,
         device=args.device,
         dtype=args.dtype,

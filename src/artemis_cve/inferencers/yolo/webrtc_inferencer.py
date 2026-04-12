@@ -14,6 +14,7 @@ class SharedYoloBoxInferencer(YoloBoxInferencer):
     def __init__(
         self,
         model_dir: str | Path,
+        textencoder_model_dir: str | Path,
         class_names: Sequence[str] | None = None,
         device: str | torch.device = "cpu",
         dtype: str = "fp32",
@@ -22,6 +23,7 @@ class SharedYoloBoxInferencer(YoloBoxInferencer):
     ) -> None:
         super().__init__(
             model_dir=model_dir,
+            textencoder_model_dir=textencoder_model_dir,
             class_names=class_names,
             device=device,
             dtype=dtype,

@@ -54,6 +54,7 @@ class YoloBoxInferencer:
     def __init__(
         self,
         model_dir: str | Path,
+        textencoder_model_dir: str | Path,
         class_names: Sequence[str] | None = None,
         device: str | torch.device = "cpu",
         dtype: str = "fp32",
@@ -61,6 +62,7 @@ class YoloBoxInferencer:
         use_cuda_graph: bool | None = None,
     ) -> None:
         self.model_dir = Path(model_dir)
+        self.textencoder_model_dir = Path(textencoder_model_dir)
         self.device = torch.device(device)
         self.dtype_name = str(dtype).strip().lower()
         self.dtype = self._resolve_dtype(self.dtype_name)
@@ -87,8 +89,7 @@ class YoloBoxInferencer:
                 "Pass them via CLI/env or add default_classes to the model config."
             )
         self.text_encoder = YOLOETextEncoder.from_pretrained(
-            self.model_dir,
-            config=self.config,
+            self.textencoder_model_dir,
             device=self.device,
         )
         self.text_embeddings = self.text_encoder.encode(

@@ -24,6 +24,7 @@ from artemis_cve.models.yolo26e import YOLOERawOutput, forward_yoloe_task_model_
 DEFAULT_IMAGE_DIR = Path("data-bin/images")
 DEFAULT_CLASS_NAMES_FILE = Path("model-bin/names.txt")
 DEFAULT_HF_MODEL_DIR = Path("model-bin/MigoXV/yoloe26-x-seg")
+DEFAULT_HF_TEXT_ENCODER_DIR = Path("model-bin/MigoXV/mobileclip2-b")
 DEFAULT_OPENVISION_MODEL = Path("model-bin/openvision/yoloe26-x-seg/model.pt")
 DEFAULT_OUTPUT_ROOT = Path("data-bin/align")
 IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png", ".bmp", ".webp")
@@ -41,6 +42,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--image-dir", default=str(DEFAULT_IMAGE_DIR))
     parser.add_argument("--class-names-file", default=str(DEFAULT_CLASS_NAMES_FILE))
     parser.add_argument("--hf-model-dir", default=str(DEFAULT_HF_MODEL_DIR))
+    parser.add_argument("--hf-text-encoder-dir", default=str(DEFAULT_HF_TEXT_ENCODER_DIR))
     parser.add_argument("--openvision-model", default=str(DEFAULT_OPENVISION_MODEL))
     parser.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
     parser.add_argument("--device", default="cpu")
@@ -325,8 +327,7 @@ def main() -> None:
     )
 
     text_encoder = YOLOETextEncoder.from_pretrained(
-        args.hf_model_dir,
-        config=hf_model.config,
+        args.hf_text_encoder_dir,
         device=device,
     )
     base_text_embeddings = text_encoder.encode(class_names, dtype=torch.float32)
@@ -351,6 +352,7 @@ def main() -> None:
 
     inferencer = YoloBoxInferencer(
         model_dir=args.hf_model_dir,
+        textencoder_model_dir=args.hf_text_encoder_dir,
         class_names=class_names,
         device=device,
         dtype="fp32",

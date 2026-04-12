@@ -12,6 +12,8 @@ RUN apt update && \
     /app/.venv/bin/pip cache purge && \
     rm -rf wheels
 
+ENV ULTRALYTICS_SKIP_REQUIREMENTS_CHECKS=1
+
 # 拷贝必要的文件以安装依赖
 COPY pyproject.toml poetry.lock README.md ./
 RUN mkdir -p src/artemis_cve && \
